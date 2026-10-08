@@ -1,0 +1,80 @@
+#!/bin/bash
+# Reconnect the AirPods and repair everything around them:
+# Bluetooth link, librepods state, A2DP profile, default sink, stream routing, mutes.
+
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/airpods-fix.lock"
+flock -n 9 || exit 0
+
+notify() { notify-send -a "AirPods" -i audio-headphones "AirPods" "$1"; }
+log() { echo "airpods-fix: $*"; }
+
+# Paired Apple device whose name contains "AirPods"
+MAC=$(bluetoothctl devices Paired | awk '/AirPods/ {print $2; exit}')
+if [[ -z $MAC ]]; then
+  notify "Keine gekoppelten AirPods gefunden – bitte neu koppeln."
+  exit 1
+fi
+ID=${MAC//:/_}
+CARD="bluez_card.$ID"
+
+connected() { bluetoothctl info "$MAC" | grep -q "Connected: yes"; }
+card_exists() { pactl list cards short | grep -q "$CARD"; }
+sink_name() { pactl list sinks short | awk -v id="bluez_output.$ID" '$2 ~ id {print $2; exit}'; }
+
+# 1. Bluetooth link
+rfkill unblock bluetooth 2>/dev/null
+bluetoothctl power on >/dev/null
+if ! connected; then
+  log "connecting $MAC"
+  for attempt in 1 2 3; do
+    timeout 15 bluetoothctl connect "$MAC" >/dev/null 2>&1
+    sleep 2
+    connected && break
+    [[ $attempt == 2 ]] && { bluetoothctl disconnect "$MAC" >/dev/null 2>&1; sleep 2; }
+  done
+fi
+if ! connected; then
+  notify "Verbindung fehlgeschlagen. Case öffnen / AirPods ins Ohr und nochmal klicken."
+  exit 1
+fi
+
+# 2. librepods: restart if it lost track of the device (stale state leaves the profile on "off")
+STATUS="${XDG_STATE_HOME:-$HOME/.local/state}/librepods/status.json"
+if systemctl --user is-enabled -q librepods.service 2>/dev/null; then
+  if ! systemctl --user is-active -q librepods.service ||
+     ! grep -q '"connected":true' "$STATUS" 2>/dev/null; then
+    log "restarting librepods"
+    systemctl --user restart librepods.service
+    sleep 3
+  fi
+fi
+
+# 3. Audio card + A2DP profile
+for _ in $(seq 20); do card_exists && break; sleep 0.5; done
+if ! card_exists; then
+  notify "Verbunden, aber keine Audio-Karte. Bluetooth-Audio wird neu gestartet…"
+  systemctl --user restart wireplumber
+  sleep 3
+fi
+profile=$(pactl list cards | sed -n "/Name: $CARD/,/^Card/p" | awk -F': ' '/Active Profile/ {print $2}')
+if [[ $profile != a2dp-sink* ]]; then
+  log "profile '$profile' -> a2dp"
+  for p in a2dp-sink a2dp-sink-sbc_xq a2dp-sink-sbc; do
+    pactl set-card-profile "$CARD" "$p" 2>/dev/null && break
+  done
+fi
+
+# 4. Default sink, route every stream there, clear mutes
+for _ in $(seq 20); do SINK=$(sink_name); [[ -n $SINK ]] && break; sleep 0.5; done
+if [[ -z $SINK ]]; then
+  notify "Kein AirPods-Ausgang verfügbar – nochmal versuchen."
+  exit 1
+fi
+pactl set-default-sink "$SINK"
+pactl set-sink-mute "$SINK" 0
+for input in $(pactl list sink-inputs short | awk '{print $1}'); do
+  pactl move-sink-input "$input" "$SINK" 2>/dev/null
+  pactl set-sink-input-mute "$input" 0 2>/dev/null
+done
+
+notify "Verbunden und als Ausgabe aktiv ✓"

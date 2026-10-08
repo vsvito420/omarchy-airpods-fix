@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "vito.airpods-fix",
+  "name": "AirPods Fix",
+  "version": "1.0.0",
+  "author": "vito",
+  "description": "One click: reconnect the AirPods and repair profile, output and mutes",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "AirPods Fix",
+    "description": "Reconnects the AirPods and makes them the active output",
+    "category": "Audio",
+    "allowMultiple": false
+  }
+}
